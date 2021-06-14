@@ -87,21 +87,12 @@ int vprintf_null(const char *format, va_list ap) {
     return 0;
 }
 
-void mp_task(void *pvParameter) {
-    volatile uint32_t sp = (uint32_t)get_sp();
-    #if MICROPY_PY_THREAD
-    mp_thread_init(pxTaskGetStackStart(NULL), MP_TASK_STACK_SIZE / sizeof(uintptr_t));
-    #endif
-    #if CONFIG_USB_ENABLED
-    usb_init();
-    #elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-    usb_serial_jtag_init();
-    #endif
-    #if MICROPY_HW_ENABLE_UART_REPL
-    uart_stdout_init();
-    #endif
-    machine_init();
+struct alloc_mp_task_heap_t {
+    void *heap;
+    size_t size;    
+};
 
+void alloc_heap(struct alloc_mp_task_heap_t *mp_heap) {
     size_t mp_task_heap_size;
     void *mp_task_heap = NULL;
 
@@ -147,11 +138,32 @@ void mp_task(void *pvParameter) {
         mp_task_heap = malloc(mp_task_heap_size);
     }
 
+    mp_heap->size = mp_task_heap_size;
+    mp_heap->heap = mp_task_heap;
+}
+
+void mp_task(void *pvParameter) {
+    struct alloc_mp_task_heap_t *mp_heap = pvParameter;
+    volatile uint32_t sp = (uint32_t)get_sp();
+    #if MICROPY_PY_THREAD
+    mp_thread_init(pxTaskGetStackStart(NULL), MP_TASK_STACK_SIZE / sizeof(uintptr_t));
+    #endif
+    #if CONFIG_USB_ENABLED
+    usb_init();
+    #elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    usb_serial_jtag_init();
+    #endif
+    #if MICROPY_HW_ENABLE_UART_REPL
+    uart_stdout_init();
+    #endif
+    machine_init();
+
+
 soft_reset:
     // initialise the stack pointer for the main thread
     mp_stack_set_top((void *)sp);
     mp_stack_set_limit(MP_TASK_STACK_SIZE - MP_TASK_STACK_LIMIT_MARGIN);
-    gc_init(mp_task_heap, mp_task_heap + mp_task_heap_size);
+    gc_init(mp_heap->heap, mp_heap->heap + mp_heap->size);
     mp_init();
     mp_obj_list_append(mp_sys_path, MP_OBJ_NEW_QSTR(MP_QSTR__slash_lib));
     readline_init0();
@@ -242,12 +254,15 @@ void boardctrl_startup(void) {
 }
 
 void app_main(void) {
+    static struct alloc_mp_task_heap_t mp_task_heap;
+    alloc_heap(&mp_task_heap);
+    
     // Hook for a board to run code at start up.
     // This defaults to initialising NVS.
     MICROPY_BOARD_STARTUP();
 
     // Create and transfer control to the MicroPython task.
-    xTaskCreatePinnedToCore(mp_task, "mp_task", MP_TASK_STACK_SIZE / sizeof(StackType_t), NULL, MP_TASK_PRIORITY, &mp_main_task_handle, MP_TASK_COREID);
+    xTaskCreatePinnedToCore(mp_task, "mp_task", MP_TASK_STACK_SIZE / sizeof(StackType_t), &mp_task_heap, MP_TASK_PRIORITY, &mp_main_task_handle, MP_TASK_COREID);
 }
 
 void nlr_jump_fail(void *val) {

@@ -70,23 +70,12 @@
 #define MP_TASK_PRIORITY        (ESP_TASK_PRIO_MIN + 1)
 #define MP_TASK_STACK_SIZE      (16 * 1024)
 
-int vprintf_null(const char *format, va_list ap) {
-    // do nothing: this is used as a log target during raw repl mode
-    return 0;
-}
+struct alloc_mp_task_heap_t {
+    void *heap;
+    size_t size;    
+};
 
-void mp_task(void *pvParameter) {
-    volatile uint32_t sp = (uint32_t)get_sp();
-    #if MICROPY_PY_THREAD
-    mp_thread_init(pxTaskGetStackStart(NULL), MP_TASK_STACK_SIZE / sizeof(uintptr_t));
-    #endif
-    #if CONFIG_USB_ENABLED
-    usb_init();
-    #else
-    uart_init();
-    #endif
-    machine_init();
-
+void alloc_heap(struct alloc_mp_task_heap_t *mp_heap) {
     // TODO: CONFIG_SPIRAM_SUPPORT is for 3.3 compatibility, remove after move to 4.0.
     #if CONFIG_ESP32_SPIRAM_SUPPORT || CONFIG_SPIRAM_SUPPORT
     // Try to use the entire external SPIRAM directly for the heap
@@ -124,11 +113,34 @@ void mp_task(void *pvParameter) {
     void *mp_task_heap = malloc(mp_task_heap_size);
     #endif
 
+    mp_heap->heap = mp_task_heap;
+    mp_heap->size = mp_task_heap_size;
+}
+
+int vprintf_null(const char *format, va_list ap) {
+    // do nothing: this is used as a log target during raw repl mode
+    return 0;
+}
+
+void mp_task(void *pvParameter) {
+    struct alloc_mp_task_heap_t *mp_heap = pvParameter;
+
+    volatile uint32_t sp = (uint32_t)get_sp();
+    #if MICROPY_PY_THREAD
+    mp_thread_init(pxTaskGetStackStart(NULL), MP_TASK_STACK_SIZE / sizeof(uintptr_t));
+    #endif
+    #if CONFIG_USB_ENABLED
+    usb_init();
+    #else
+    uart_init();
+    #endif
+    machine_init();
+
 soft_reset:
     // initialise the stack pointer for the main thread
     mp_stack_set_top((void *)sp);
     mp_stack_set_limit(MP_TASK_STACK_SIZE - 1024);
-    gc_init(mp_task_heap, mp_task_heap + mp_task_heap_size);
+    gc_init(mp_heap->heap, mp_heap->heap + mp_heap->size);
     mp_init();
     mp_obj_list_init(mp_sys_path, 0);
     mp_obj_list_append(mp_sys_path, MP_OBJ_NEW_QSTR(MP_QSTR_));
@@ -191,12 +203,15 @@ soft_reset_exit:
 }
 
 void app_main(void) {
+    static struct alloc_mp_task_heap_t mp_task_heap;
+    alloc_heap(&mp_task_heap);
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         nvs_flash_init();
     }
-    xTaskCreatePinnedToCore(mp_task, "mp_task", MP_TASK_STACK_SIZE / sizeof(StackType_t), NULL, MP_TASK_PRIORITY, &mp_main_task_handle, MP_TASK_COREID);
+    xTaskCreatePinnedToCore(mp_task, "mp_task", MP_TASK_STACK_SIZE / sizeof(StackType_t), &mp_task_heap, MP_TASK_PRIORITY, &mp_main_task_handle, MP_TASK_COREID);
 }
 
 void nlr_jump_fail(void *val) {
